@@ -1,0 +1,32 @@
+{
+  "name": "folio-notebook",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "dev": "vite --host 127.0.0.1",
+    "server": "node server/index.js",
+    "build": "vite build",
+    "preview": "vite preview --host 127.0.0.1",
+    "test": "vitest run src && node --test server/*.test.js",
+    "test:unit": "vitest run src",
+    "test:e2e": "playwright test"
+  },
+  "keywords": [],
+  "type": "module",
+  "dependencies": {
+    "dotenv": "^18.0.9",
+    "express": "^5.3.0",
+    "jspdf": "^4.2.1",
+    "lucide-react": "^1.61.0",
+    "pdfjs-dist": "^6.4.299",
+    "react": "^19.3.1",
+    "react-dom": "^19.3.1"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.64.1",
+    "@vitejs/plugin-react": "^6.1.2",
+    "vite": "^8.3.5",
+    "vitest": "^5.0.5"
+  }
+}

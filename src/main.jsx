@@ -328,10 +328,12 @@ function App() {
       ...s,
       [page.id]: [...(s[page.id] || []), { role: "user", content: text }],
     }));
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 45000);
     try {
       const image = await canvas.current.exportImage(false);
       const res = await fetch("/api/tutor", {
-        signal: AbortSignal.timeout(45000),
+        signal: controller.signal,
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -392,12 +394,13 @@ function App() {
       setConfigured(true);
     } catch (e) {
       setError(
-        e.name === "TimeoutError"
+        e.name === "TimeoutError" || e.name === "AbortError"
           ? "Tutor request timed out. Please try again."
           : e.message,
       );
       setQuestion((current) => current || text);
     } finally {
+      clearTimeout(timeout);
       setLoading(false);
     }
   }
@@ -420,6 +423,12 @@ function App() {
     );
   }
   function voice() {
+    if (!window.isSecureContext) {
+      setToast(
+        "Voice input requires HTTPS or localhost. You can still type your question over LAN HTTP.",
+      );
+      return;
+    }
     const Speech = window.SpeechRecognition || window.webkitSpeechRecognition;
     if (!Speech) {
       setToast("Voice input is not supported in this browser. Try Chrome.");
@@ -438,8 +447,13 @@ function App() {
       setListening(false);
       setToast(`Microphone: ${e.error}`);
     };
-    rec.start();
-    setListening(true);
+    try {
+      rec.start();
+      setListening(true);
+    } catch (error) {
+      setListening(false);
+      setToast(`Microphone unavailable: ${error.message}`);
+    }
   }
   async function importPDF(event) {
     const file = event.target.files?.[0];

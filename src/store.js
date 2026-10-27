@@ -1,4 +1,5 @@
-export const uid = () => crypto.randomUUID();
+import { uid } from "./ids.js";
+export { uid } from "./ids.js";
 export function newPage(paper = "grid") {
   return { id: uid(), paper, elements: [] };
 }

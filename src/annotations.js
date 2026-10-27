@@ -1,3 +1,4 @@
+import { uid } from "./ids.js";
 import { getBounds, intersectBounds } from "./canvas.js";
 
 const PAGE = { width: 800, height: 1100 };
@@ -110,7 +111,7 @@ export function placeAnnotations(annotations, page = {}, options = {}) {
     }
     const element = {
       ...box,
-      id: globalThis.crypto.randomUUID(),
+      id: uid(),
       ai: true,
       type: annotation.type,
       color: /^#[0-9a-f]{6}$/i.test(annotation.color)

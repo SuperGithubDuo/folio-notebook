@@ -20,6 +20,18 @@ npm run server
 
 Never put API keys in the browser or commit `.env`. For compatible providers, configure the base URL and a vision-capable model. Your page image, selected region information, and conversation are sent to that provider only when you ask the tutor. There is no canned AI response or offline handwriting recognition.
 
+## Access from an iPad or phone on your LAN
+
+Run `npm run dev:lan` instead of `npm run dev`, then open `http://<computer-LAN-IP>:5173` on a device on the same trusted Wi-Fi. Find the address with Windows `ipconfig`. The normal `dev` command remains localhost-only. Do not enable public port forwarding or disable your firewall; if prompted, allow Node only on your trusted private network.
+
+HTTP LAN origins do not expose `crypto.randomUUID()`. All notebook/page/ink/annotation IDs use one helper that prefers native UUIDs, otherwise uses `crypto.getRandomValues()` with UUID-v4 version/variant bits. No weak random-number fallback is used.
+
+Browser data is per device and origin: localhost notes do not automatically appear on a LAN IP or iPad. Export a backup before changing addresses. HTTP traffic is unencrypted; use trusted HTTPS and authentication for sensitive data or broader access.
+
+Voice input requires HTTPS/localhost and reports this limitation on HTTP LAN. The API remains bound to loopback with its existing localhost-origin checks; LAN AI requests are deliberately not enabled by relaxing those protections. Core notebook work does not require AI. Configure authenticated HTTPS before enabling remote tutoring.
+
+For LAN regression tests, install WebKit (`npx playwright install webkit`) and run `npm run test:lan` while the LAN server is running. Set `FOLIO_LAN_URL=http://<IP>:5173` to select an address; otherwise the tests discover a private IPv4 interface. Tests cover Chromium, mobile Chromium, WebKit and an iPad-sized WebKit profile; this is not a physical iPad test.
+
 ## Notebook tools
 
 - Create/rename notebooks, favorites, folders, move to folder, trash and restore.

@@ -16,9 +16,7 @@ import {
 } from "./canvas.js";
 
 const FONT = "'Caveat', 'Segoe Print', cursive";
-const uid = () =>
-  globalThis.crypto?.randomUUID?.() ||
-  `ink-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+import { uid } from "./ids.js";
 
 export function InkElement({ element: e }) {
   const common = { "data-element-id": e.id };

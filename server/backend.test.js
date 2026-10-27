@@ -178,8 +178,9 @@ test("configured tutor sends vision, history and learning instructions to the pr
   );
   assert.match(
     received.body.messages[0].content,
-    /Guided Learning.*guiding question/,
+    /Hints: give one minimal hint/,
   );
+  assert.doesNotMatch(received.body.messages[0].content, /Guided Learning/);
   assert.equal(received.body.messages[1].content, "I am stuck");
   assert.equal(received.body.messages[2].role, "assistant");
   assert.equal(received.body.messages[3].content[1].image_url.url, PNG);
@@ -238,7 +239,7 @@ test("model annotations and text are normalized and bounded before returning", a
 test("upstream failure, malformed output and timeout are explicit errors without leaking secrets", async () => {
   for (const scenario of [
     { status: 401, body: "test-only-key upstream details", expected: 502 },
-    { status: 429, body: "{}", expected: 503 },
+    { status: 429, body: "{}", expected: 429 },
     { status: 500, body: "{}", expected: 502 },
     { status: 200, body: "not json", expected: 502 },
     {
@@ -284,6 +285,125 @@ test("upstream failure, malformed output and timeout are explicit errors without
             if (scenario.status === 429)
               assert.match(result.error, /rate limited/);
             assert.doesNotMatch(result.error, /test-only-key|upstream details/);
+          },
+        );
+      },
+    );
+  }
+});
+
+test("provider errors retain safe status codes and bounded retry advice without upstream bodies", async () => {
+  for (const scenario of [
+    {
+      upstream: 401,
+      status: 502,
+      code: "PROVIDER_AUTH",
+      message: /credentials/,
+    },
+    {
+      upstream: 403,
+      status: 502,
+      code: "PROVIDER_AUTH",
+      message: /permissions/,
+    },
+    {
+      upstream: 404,
+      status: 502,
+      code: "PROVIDER_CONFIGURATION",
+      message: /model|endpoint/,
+    },
+    {
+      upstream: 429,
+      status: 429,
+      code: "PROVIDER_RATE_LIMIT",
+      message: /rate limited/,
+      retry: "12",
+    },
+    {
+      upstream: 503,
+      status: 503,
+      code: "PROVIDER_UNAVAILABLE",
+      message: /unavailable/,
+      retry: "999999",
+    },
+    {
+      upstream: 504,
+      status: 504,
+      code: "PROVIDER_TIMEOUT",
+      message: /timed out/,
+    },
+  ]) {
+    await withProvider(
+      (_req, res) => {
+        res.writeHead(
+          scenario.upstream,
+          scenario.retry ? { "Retry-After": scenario.retry } : {},
+        );
+        res.end("test-only-key PRIVATE diagnostic <html>");
+      },
+      async (baseURL) => {
+        await withApp(
+          {
+            env: { OPENAI_API_KEY: "test-only-key", OPENAI_BASE_URL: baseURL },
+          },
+          async (base) => {
+            const response = await post(base, { message: "Hi" });
+            const body = await response.json();
+            assert.equal(response.status, scenario.status);
+            assert.equal(body.code, scenario.code);
+            assert.equal(body.upstreamStatus, scenario.upstream);
+            assert.match(body.error, scenario.message);
+            assert.doesNotMatch(
+              JSON.stringify(body),
+              /test-only-key|PRIVATE|html/,
+            );
+            if (scenario.retry) {
+              const expected = String(Math.min(3600, Number(scenario.retry)));
+              assert.equal(response.headers.get("retry-after"), expected);
+              assert.equal(body.retryAfter, Number(expected));
+            }
+          },
+        );
+      },
+    );
+  }
+});
+
+test("transport disconnects, malformed JSON and slow response bodies have distinct safe errors", async () => {
+  for (const scenario of ["disconnect", "malformed", "slow-body"]) {
+    await withProvider(
+      (req, res) => {
+        if (scenario === "disconnect") return req.socket.destroy();
+        res.writeHead(200, { "Content-Type": "application/json" });
+        if (scenario === "slow-body") {
+          res.flushHeaders();
+          res.write('{"choices":');
+          return;
+        }
+        res.end("test-only-key invalid-json");
+      },
+      async (baseURL) => {
+        await withApp(
+          {
+            env: { OPENAI_API_KEY: "test-only-key", OPENAI_BASE_URL: baseURL },
+            timeoutMs: 50,
+          },
+          async (base) => {
+            const response = await post(base, { message: "Hi" });
+            const body = await response.json();
+            assert.equal(response.status, scenario === "slow-body" ? 504 : 502);
+            assert.equal(
+              body.code,
+              {
+                disconnect: "PROVIDER_CONNECTION",
+                malformed: "PROVIDER_INVALID_RESPONSE",
+                "slow-body": "PROVIDER_TIMEOUT",
+              }[scenario],
+            );
+            assert.doesNotMatch(
+              JSON.stringify(body),
+              /test-only-key|invalid-json|socket|stack/,
+            );
           },
         );
       },
@@ -352,6 +472,49 @@ test("server loads a local dotenv file before constructing its default app", asy
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
+});
+
+// Controlled local provider fixtures verify transport contracts, NOT model quality.
+test("mode-specific request payloads contain only the selected teaching strategy", async () => {
+  const { requestTutor, validateRequest } = await import("./tutor.js");
+  const strategies = {
+    learn: /one guiding question.*small hint/i,
+    socratic: /one minimal hint.*do not reveal/i,
+    explain: /teach the concept step by step.*worked example/i,
+    solve: /complete solution.*final answer/i,
+    check: /audit the student's steps.*first incorrect step/i,
+    practice: /generate.*targeted exercises.*practice array/i,
+    quiz: /one question at a time.*withhold.*answer/i,
+  };
+  const captured = [];
+  await withProvider(
+    (_req, res, body) => {
+      captured.push(body);
+      res.end(
+        completion({
+          reply: "Contract fixture only.",
+          annotations: [],
+          practice: [],
+        }),
+      );
+    },
+    async (baseURL) => {
+      for (const mode of Object.keys(strategies)) {
+        await requestTutor(validateRequest({ message: "Help", mode }), {
+          env: { OPENAI_API_KEY: "test-only-key", OPENAI_BASE_URL: baseURL },
+        });
+      }
+    },
+  );
+  Object.entries(strategies).forEach(([mode, strategy], index) => {
+    const system = captured[index].messages[0].content;
+    assert.match(system, strategy, mode);
+    assert.match(system, /never cover existing handwriting/);
+    assert.doesNotMatch(system, /for learn|for explain|for solve/);
+    for (const [other, pattern] of Object.entries(strategies))
+      if (other !== mode)
+        assert.doesNotMatch(system, pattern, `${mode} contains ${other}`);
+  });
 });
 
 test("health reports missing credentials without exposing configuration", async () => {

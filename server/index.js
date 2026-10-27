@@ -42,21 +42,32 @@ export function createApp({ env = process.env, timeoutMs = 30_000 } = {}) {
   app.use((error, _req, res, _next) => {
     const status =
       error.type === "entity.too.large" ? 413 : error.status || 500;
-    res
-      .status(status)
-      .json({
-        error:
-          status === 400
-            ? "Invalid request: " +
-              (error.type === "entity.parse.failed"
-                ? "malformed JSON."
-                : error.message)
-            : status === 413
-              ? "Request body is too large."
-              : error instanceof TutorError
-                ? error.message
-                : "The tutor service failed.",
-      });
+    if (error instanceof TutorError && Number.isFinite(error.retryAfter))
+      res.set("Retry-After", String(error.retryAfter));
+    res.status(status).json({
+      ...(error instanceof TutorError
+        ? {
+            ...(error.code ? { code: error.code } : {}),
+            ...(error.upstreamStatus
+              ? { upstreamStatus: error.upstreamStatus }
+              : {}),
+            ...(Number.isFinite(error.retryAfter)
+              ? { retryAfter: error.retryAfter }
+              : {}),
+          }
+        : {}),
+      error:
+        status === 400
+          ? "Invalid request: " +
+            (error.type === "entity.parse.failed"
+              ? "malformed JSON."
+              : error.message)
+          : status === 413
+            ? "Request body is too large."
+            : error instanceof TutorError
+              ? error.message
+              : "The tutor service failed.",
+    });
   });
   return app;
 }

@@ -48,6 +48,7 @@ import {
 } from "lucide-react";
 import NotebookCanvas from "./NotebookCanvas.jsx";
 import { createLibrary, libraryReducer, newPage, uid } from "./store.js";
+import { placeAnnotations, placePractice } from "./annotations.js";
 import "./styles.css";
 const STORAGE = "folio.library.v1";
 function readInitial() {
@@ -56,7 +57,30 @@ function readInitial() {
     if (
       value?.version === 1 &&
       Array.isArray(value.notebooks) &&
-      value.notebooks.length
+      value.notebooks.length &&
+      Array.isArray(value.folders) &&
+      value.folders.every((f) => typeof f === "string") &&
+      value.notebooks.every(
+        (n) =>
+          typeof n.id === "string" &&
+          typeof n.name === "string" &&
+          Array.isArray(n.pages) &&
+          n.pages.length &&
+          n.pages.every(
+            (p) =>
+              typeof p.id === "string" &&
+              Array.isArray(p.elements) &&
+              p.elements.every(
+                (e) =>
+                  e &&
+                  typeof e.id === "string" &&
+                  ["stroke", "text", "rect", "ellipse", "arrow"].includes(
+                    e.type,
+                  ) &&
+                  (e.type !== "stroke" || Array.isArray(e.points)),
+              ),
+          ),
+      )
     )
       return value;
   } catch {}
@@ -95,9 +119,13 @@ function App() {
     [left, setLeft] = useState(() => window.innerWidth >= 1000),
     [pagesOpen, setPagesOpen] = useState(() => window.innerWidth >= 700),
     [aiOpen, setAiOpen] = useState(() => window.innerWidth >= 1100),
-    [theme, setTheme] = useState(
-      () => localStorage.getItem("folio.theme") || "light",
-    ),
+    [theme, setTheme] = useState(() => {
+      try {
+        return localStorage.getItem("folio.theme") || "light";
+      } catch {
+        return "light";
+      }
+    }),
     [filter, setFilter] = useState("Notebooks"),
     [query, setQuery] = useState(""),
     [modal, setModal] = useState(null),
@@ -110,7 +138,7 @@ function App() {
     [question, setQuestion] = useState(""),
     [chats, setChats] = useState({}),
     [loading, setLoading] = useState(false),
-    [error, setError] = useState(""),
+    [errors, setErrors] = useState({}),
     [configured, setConfigured] = useState(false),
     [practice, setPractice] = useState([]),
     [busy, setBusy] = useState(false),
@@ -127,21 +155,28 @@ function App() {
     library.notebooks[0];
   const page = nb.pages.find((p) => p.id === library.activePage) || nb.pages[0];
   const messages = chats[page.id] || [];
+  const error = errors[page.id] || "";
+  function setError(message) {
+    setErrors((s) => ({ ...s, [page.id]: message }));
+  }
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
-    localStorage.setItem("folio.theme", theme);
+    try {
+      localStorage.setItem("folio.theme", theme);
+    } catch {
+      /* Theme still works without browser storage. */
+    }
   }, [theme]);
   useEffect(() => {
     setSaveStatus("Saving…");
-    const timer = setTimeout(() => {
-      try {
-        localStorage.setItem(STORAGE, JSON.stringify(library));
-        setSaveStatus("Saved locally");
-      } catch {
-        setSaveStatus("Storage full — export a backup");
-      }
-    }, 350);
-    return () => clearTimeout(timer);
+    // Commit on each document change, not after a cancellable debounce.
+    // Pointer previews are canvas-local, so this runs only for committed ink.
+    try {
+      localStorage.setItem(STORAGE, JSON.stringify(library));
+      setSaveStatus("Saved locally");
+    } catch {
+      setSaveStatus("Storage unavailable — export a backup");
+    }
   }, [library]);
   useEffect(() => {
     fetch("/api/health")
@@ -296,6 +331,7 @@ function App() {
     try {
       const image = await canvas.current.exportImage(false);
       const res = await fetch("/api/tutor", {
+        signal: AbortSignal.timeout(45000),
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -325,8 +361,21 @@ function App() {
           history,
         }),
       });
-      const data = await res.json();
+      let data;
+      try {
+        data = await res.json();
+      } catch {
+        throw Error(
+          "Tutor service unavailable: the server returned an unreadable response.",
+        );
+      }
       if (!res.ok) throw Error(data.error || "The tutor could not respond.");
+      if (
+        typeof data.reply !== "string" ||
+        !Array.isArray(data.annotations) ||
+        !Array.isArray(data.practice)
+      )
+        throw Error("Tutor service unavailable: invalid response format.");
       setChats((s) => ({
         ...s,
         [page.id]: [
@@ -342,37 +391,21 @@ function App() {
       setPractice(data.practice || []);
       setConfigured(true);
     } catch (e) {
-      setError(e.message);
+      setError(
+        e.name === "TimeoutError"
+          ? "Tutor request timed out. Please try again."
+          : e.message,
+      );
+      setQuestion((current) => current || text);
     } finally {
       setLoading(false);
     }
   }
   function applyAnnotations(message) {
-    const annotations = message.annotations.map((a) => {
-      const x = a.x * 0.8,
-        y = a.y * 1.1,
-        width = (a.width || 200) * 0.8,
-        height = (a.height || 60) * 1.1;
-      return {
-        id: uid(),
-        ai: true,
-        type:
-          a.type === "circle"
-            ? "ellipse"
-            : a.type === "highlight"
-              ? "rect"
-              : a.type,
-        x,
-        y,
-        width,
-        height,
-        text: a.text || "",
-        highlight: a.type === "highlight",
-        color: "#8057ba",
-        strokeWidth: 2.5,
-        size: 22,
-      };
-    });
+    const { elements: annotations, skipped } = placeAnnotations(
+      message.annotations,
+      page,
+    );
     changeElements([...page.elements, ...annotations]);
     setChats((s) => ({
       ...s,
@@ -380,7 +413,11 @@ function App() {
         m === message ? { ...m, applied: true } : m,
       ),
     }));
-    setToast("Tutor annotations added to a separate layer.");
+    setToast(
+      skipped.length
+        ? `${annotations.length} annotations added; ${skipped.length} kept in chat to avoid covering notes.`
+        : "Tutor annotations added to a separate layer.",
+    );
   }
   function voice() {
     const Speech = window.SpeechRecognition || window.webkitSpeechRecognition;
@@ -406,7 +443,13 @@ function App() {
   }
   async function importPDF(event) {
     const file = event.target.files?.[0];
-    if (!file) return;
+    if (!file || busy) return;
+    if (file.size > 40 * 1024 * 1024) {
+      setToast("Import failed: PDF must be 40 MB or smaller.");
+      return;
+    }
+    const targetNotebookId = nb.id;
+    let documentTask;
     setBusy(true);
     try {
       const pdfjs = await import("pdfjs-dist");
@@ -414,14 +457,23 @@ function App() {
         "pdfjs-dist/build/pdf.worker.min.mjs",
         import.meta.url,
       ).href;
-      const doc = await pdfjs.getDocument({ data: await file.arrayBuffer() })
-        .promise;
+      documentTask = pdfjs.getDocument({ data: await file.arrayBuffer() });
+      const doc = await documentTask.promise;
       if (doc.numPages > 60)
         throw Error("Please import a PDF with 60 pages or fewer.");
       const imported = [];
       for (let i = 1; i <= doc.numPages; i++) {
         const source = await doc.getPage(i),
-          viewport = source.getViewport({ scale: 1.35 }),
+          viewport = source.getViewport({
+            scale: Math.min(
+              1.35,
+              1600 /
+                Math.max(
+                  source.getViewport({ scale: 1 }).width,
+                  source.getViewport({ scale: 1 }).height,
+                ),
+            ),
+          }),
           c = document.createElement("canvas");
         c.width = viewport.width;
         c.height = viewport.height;
@@ -432,39 +484,34 @@ function App() {
           background: c.toDataURL("image/jpeg", 0.85),
         });
       }
-      updateNotebook((n) => ({ ...n, pages: [...n.pages, ...imported] }));
-      setLibrary((s) => ({ ...s, activePage: imported[0].id }));
+      setLibrary((s) => ({
+        ...s,
+        notebooks: s.notebooks.map((n) =>
+          n.id === targetNotebookId
+            ? { ...n, pages: [...n.pages, ...imported], updated: Date.now() }
+            : n,
+        ),
+        activePage:
+          s.activeNotebook === targetNotebookId ? imported[0].id : s.activePage,
+      }));
       setToast(`Imported ${imported.length} PDF pages.`);
     } catch (e) {
       setToast(`Import failed: ${e.message}`);
     } finally {
+      await documentTask?.destroy().catch(() => {});
       setBusy(false);
       event.target.value = "";
     }
   }
   async function exportPDF() {
     setBusy(true);
-    const original = page.id;
     try {
-      const { jsPDF } = await import("jspdf");
-      const pdf = new jsPDF({
-        unit: "px",
-        format: [800, 1100],
-        hotfixes: ["px_scaling"],
-      });
-      for (let i = 0; i < nb.pages.length; i++) {
-        if (i) pdf.addPage([800, 1100]);
-        setLibrary((s) => ({ ...s, activePage: nb.pages[i].id }));
-        await new Promise((r) => setTimeout(r, 90));
-        const image = await canvas.current.exportImage(false);
-        pdf.addImage(image, "PNG", 0, 0, 800, 1100);
-      }
-      pdf.save(`${nb.name}.pdf`);
+      const { exportPages } = await import("./pdf.js");
+      await exportPages(nb.pages, nb.name);
       setToast("Notebook exported as PDF.");
     } catch (e) {
       setToast(`Export failed: ${e.message}`);
     } finally {
-      setLibrary((s) => ({ ...s, activePage: original }));
       setBusy(false);
     }
   }
@@ -859,7 +906,9 @@ function App() {
             color={color}
             thickness={thickness}
             zoom={zoom}
-            onSelection={setSelection}
+            onSelection={(value) =>
+              setSelection(value?.ids?.length && value.bounds ? value : null)
+            }
             onAskAI={() => {
               setAiOpen(true);
               setQuestion("Help me understand the selected work.");
@@ -881,7 +930,11 @@ function App() {
             >
               −
             </button>
-            <button title="Reset zoom" onClick={() => setZoom(0.78)}>
+            <button
+              aria-label="Reset zoom"
+              title="Reset zoom"
+              onClick={() => setZoom(0.78)}
+            >
               {Math.round(zoom * 100)}%
             </button>
             <button
@@ -1085,20 +1138,14 @@ function App() {
                   <p>{p}</p>
                   <button
                     onClick={() => {
-                      changeElements([
-                        ...page.elements,
-                        {
-                          id: uid(),
-                          type: "text",
-                          x: 60,
-                          y: 920 + i * 55,
-                          text: p,
-                          color: "#8057ba",
-                          size: 22,
-                          ai: true,
-                        },
-                      ]);
-                      setToast("Practice problem added to the page.");
+                      const result = placePractice([p], page);
+                      if (result.elements.length)
+                        changeElements([...page.elements, ...result.elements]);
+                      setToast(
+                        result.skipped.length
+                          ? "No safe space on this page. Practice remains in the tutor panel."
+                          : "Practice problem added to the page.",
+                      );
                     }}
                   >
                     Add to page <Plus size={13} />

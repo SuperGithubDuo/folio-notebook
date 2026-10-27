@@ -20,7 +20,7 @@ const uid = () =>
   globalThis.crypto?.randomUUID?.() ||
   `ink-${Date.now()}-${Math.random().toString(36).slice(2)}`;
 
-function InkElement({ element: e }) {
+export function InkElement({ element: e }) {
   const common = { "data-element-id": e.id };
   if (e.type === "stroke")
     return (
@@ -158,7 +158,8 @@ const NotebookCanvas = forwardRef(function NotebookCanvas(
     ref,
     () => ({
       async exportImage(selectionOnly = false) {
-        await document.fonts?.ready;
+        // Snapshot the requested page synchronously: navigation can occur while
+        // fonts are loading, but must never change the image sent to the tutor.
         const source = svgRef.current,
           clone = source.cloneNode(true);
         clone
@@ -205,6 +206,7 @@ const NotebookCanvas = forwardRef(function NotebookCanvas(
         clone.setAttribute("width", Math.ceil(crop.width));
         clone.setAttribute("height", Math.ceil(crop.height));
         clone.style.background = "white";
+        await document.fonts?.ready;
         const url = URL.createObjectURL(
           new Blob([new XMLSerializer().serializeToString(clone)], {
             type: "image/svg+xml;charset=utf-8",
@@ -234,7 +236,7 @@ const NotebookCanvas = forwardRef(function NotebookCanvas(
     return [
       ((e.clientX - box.left) * 800) / box.width,
       ((e.clientY - box.top) * 1100) / box.height,
-      e.pointerType === "pen" ? e.pressure || 0.5 : 0.65,
+      e.pointerType === "pen" ? (e.pressure ?? 0.5) : 0.65,
     ];
   };
   function eraseAt(g, p) {
@@ -427,6 +429,8 @@ const NotebookCanvas = forwardRef(function NotebookCanvas(
     const g = gesture.current;
     if (!g || g.pointerId !== e.pointerId) return;
     if (e.type !== "pointercancel") {
+      // Pointerup can carry a newer position than the last pointermove.
+      move(e);
       if (g.kind === "lasso")
         setIds(elementsInBounds(elements, g.region).map((el) => el.id));
       else if (
@@ -525,7 +529,7 @@ const NotebookCanvas = forwardRef(function NotebookCanvas(
             href={page.background}
             width="800"
             height="1100"
-            preserveAspectRatio="none"
+            preserveAspectRatio="xMidYMid meet"
           />
         )}
         <rect
